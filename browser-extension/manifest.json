@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Screen Time Tracker Bridge",
+  "version": "1.0.0",
+  "description": "Sends the active browser tab URL to the local Screen Time Tracker app.",
+  "permissions": [
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:38945/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  }
+}

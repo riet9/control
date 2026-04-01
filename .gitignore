@@ -1,0 +1,19 @@
+# Runtime data
+/data/
+
+# Logs and local outputs
+*.log
+*.tmp
+*.bak
+
+# Local tooling
+.vscode/
+.idea/
+
+# Windows noise
+Thumbs.db
+Desktop.ini
+
+# Python cache if used for helper scripts later
+__pycache__/
+
