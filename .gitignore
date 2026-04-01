@@ -1,5 +1,6 @@
-# Runtime data
+﻿# Runtime data
 /data/
+/release/
 
 # Logs and local outputs
 *.log

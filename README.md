@@ -1,4 +1,4 @@
-# Screen Time Tracker
+﻿# Screen Time Tracker
 
 Windows desktop tracker for active computer time, focused on study discipline and daily limits.
 
@@ -71,6 +71,12 @@ Fallback if you do not want to build the launcher:
 
 - Double-click `start-tracker.vbs`
 - Or run `start-tracker.bat`
+
+Build a portable release archive:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\package-release.ps1 -Version v0.1.0
+```
 
 Manual run from terminal:
 
@@ -179,9 +185,12 @@ The app already includes:
 - This repository is intended for Windows users
 - No external package installation is required
 - `ScreenTimeTracker.exe` is generated locally and is not committed
+- portable release archives are generated locally under `release/`
 - Runtime data is generated automatically on first run
 - License: MIT
 
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md).
+
+
