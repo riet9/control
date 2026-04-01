@@ -226,6 +226,8 @@ $script:BrowserActivityPath = Join-Path $script:DataDirectory "browser-activity.
 $script:BrowserExtensionDirectory = Join-Path $script:AppRoot "browser-extension"
 $script:ImageDirectory = Join-Path $script:AppRoot "Image"
 $script:AppIconPath = Join-Path $script:ImageDirectory "tracker_time.ico"
+$script:LauncherSourcePath = Join-Path $script:AppRoot "launcher\ScreenTimeTrackerLauncher.cs"
+$script:ExeLauncherPath = Join-Path $script:AppRoot "ScreenTimeTracker.exe"
 $script:VbsLauncherPath = Join-Path $script:AppRoot "start-tracker.vbs"
 $script:StartupLogPath = Join-Path $script:DataDirectory "startup-error.log"
 $script:ReopenSignalPath = Join-Path $script:DataDirectory "reopen.signal"
@@ -1787,8 +1789,18 @@ function Get-EffectiveActivity {
 }
 
 function Get-AutoStartCommand {
-    $quotedLauncher = '"' + $script:VbsLauncherPath + '"'
-    return '"' + (Get-WscriptPath) + '" ' + $quotedLauncher + ' -StartMinimized'
+    param(
+        [switch]$EnsureLauncher
+    )
+
+    $launcherSpec = Get-PreferredLauncherSpec -EnsureAvailable:$EnsureLauncher
+    $quotedTarget = '"' + [string]$launcherSpec.TargetPath + '"'
+    $arguments = [string]$launcherSpec.Arguments
+    if ([string]::IsNullOrWhiteSpace($arguments)) {
+        return $quotedTarget
+    }
+
+    return $quotedTarget + ' ' + $arguments
 }
 
 function Get-WscriptPath {
@@ -1798,6 +1810,124 @@ function Get-WscriptPath {
     }
 
     return "wscript.exe"
+}
+
+function Get-CscPath {
+    $candidates = @(
+        (Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
+        (Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe")
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Test-ExeLauncherAvailable {
+    return (Test-Path -LiteralPath $script:ExeLauncherPath)
+}
+
+function Ensure-ExeLauncher {
+    if (-not (Test-Path -LiteralPath $script:LauncherSourcePath)) {
+        return $false
+    }
+
+    $requiresBuild = -not (Test-ExeLauncherAvailable)
+    if (-not $requiresBuild) {
+        try {
+            $exeInfo = Get-Item -LiteralPath $script:ExeLauncherPath -ErrorAction Stop
+            $sourceInfo = Get-Item -LiteralPath $script:LauncherSourcePath -ErrorAction Stop
+            $requiresBuild = $sourceInfo.LastWriteTimeUtc -gt $exeInfo.LastWriteTimeUtc
+            if ((-not $requiresBuild) -and (Test-Path -LiteralPath $script:AppIconPath)) {
+                $iconInfo = Get-Item -LiteralPath $script:AppIconPath -ErrorAction Stop
+                $requiresBuild = $iconInfo.LastWriteTimeUtc -gt $exeInfo.LastWriteTimeUtc
+            }
+        }
+        catch {
+            $requiresBuild = $true
+        }
+    }
+
+    if (-not $requiresBuild) {
+        return $true
+    }
+
+    $cscPath = Get-CscPath
+    if ([string]::IsNullOrWhiteSpace([string]$cscPath)) {
+        return $false
+    }
+
+    $arguments = @(
+        "/nologo",
+        "/target:winexe",
+        "/optimize+",
+        "/reference:System.Windows.Forms.dll",
+        "/out:$script:ExeLauncherPath"
+    )
+    if (Test-Path -LiteralPath $script:AppIconPath) {
+        $arguments += "/win32icon:$script:AppIconPath"
+    }
+    $arguments += $script:LauncherSourcePath
+
+    try {
+        $output = & $cscPath @arguments 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0 -or -not (Test-ExeLauncherAvailable)) {
+            throw ("Launcher compile failed. " + $output.Trim())
+        }
+
+        return $true
+    }
+    catch {
+        try {
+            Ensure-Storage
+            Add-Content -LiteralPath $script:StartupLogPath -Value ("Launcher build failed: " + $_.Exception.Message) -Encoding UTF8
+        }
+        catch {
+        }
+
+        return $false
+    }
+}
+
+function Get-PreferredLauncherSpec {
+    param(
+        [switch]$EnsureAvailable
+    )
+
+    if ($EnsureAvailable) {
+        [void](Ensure-ExeLauncher)
+    }
+
+    if (Test-ExeLauncherAvailable) {
+        return @{
+            Kind = "exe"
+            TargetPath = $script:ExeLauncherPath
+            Arguments = "-StartMinimized"
+        }
+    }
+
+    return @{
+        Kind = "vbs"
+        TargetPath = Get-WscriptPath
+        Arguments = '"' + $script:VbsLauncherPath + '" -StartMinimized'
+    }
+}
+
+function Normalize-LauncherText {
+    param(
+        [AllowNull()]
+        [string]$Value
+    )
+
+    if ($null -eq $Value) {
+        return ""
+    }
+
+    return (($Value -replace "\s+", " ").Trim()).ToLowerInvariant()
 }
 
 function Get-StartupShortcutPath {
@@ -1825,32 +1955,47 @@ function Get-DesiredAutoStartEnabled {
 }
 
 function Test-StartupShortcutEnabled {
+    param(
+        [hashtable]$LauncherSpec
+    )
+
     $shortcutPath = Get-StartupShortcutPath
     if (-not (Test-Path -LiteralPath $shortcutPath)) {
         return $false
     }
 
+    if ($null -eq $LauncherSpec) {
+        $LauncherSpec = Get-PreferredLauncherSpec
+    }
+
     try {
         $shell = New-Object -ComObject WScript.Shell
         $shortcut = $shell.CreateShortcut($shortcutPath)
-        return ([string]$shortcut.TargetPath).ToLowerInvariant().EndsWith("wscript.exe") -and ([string]$shortcut.Arguments).Contains("start-tracker.vbs")
+        $targetMatches = (Normalize-LauncherText ([string]$shortcut.TargetPath)) -eq (Normalize-LauncherText ([string]$LauncherSpec.TargetPath))
+        $argumentMatches = (Normalize-LauncherText ([string]$shortcut.Arguments)) -eq (Normalize-LauncherText ([string]$LauncherSpec.Arguments))
+        return $targetMatches -and $argumentMatches
     }
     catch {
-        return $true
+        return $false
     }
 }
 
 function Set-StartupShortcutEnabled {
     param(
-        [bool]$Enabled
+        [bool]$Enabled,
+        [hashtable]$LauncherSpec
     )
 
     $shortcutPath = Get-StartupShortcutPath
     if ($Enabled) {
+        if ($null -eq $LauncherSpec) {
+            $LauncherSpec = Get-PreferredLauncherSpec -EnsureAvailable
+        }
+
         $shell = New-Object -ComObject WScript.Shell
         $shortcut = $shell.CreateShortcut($shortcutPath)
-        $shortcut.TargetPath = Get-WscriptPath
-        $shortcut.Arguments = '"' + $script:VbsLauncherPath + '" -StartMinimized'
+        $shortcut.TargetPath = [string]$LauncherSpec.TargetPath
+        $shortcut.Arguments = [string]$LauncherSpec.Arguments
         $shortcut.WorkingDirectory = $script:AppRoot
         if (Test-Path -LiteralPath $script:AppIconPath) {
             $shortcut.IconLocation = $script:AppIconPath
@@ -1862,16 +2007,44 @@ function Set-StartupShortcutEnabled {
     Remove-Item -LiteralPath $shortcutPath -ErrorAction SilentlyContinue
 }
 
-function Test-AutoStartEnabled {
-    $regEnabled = $false
+function Test-RunAutoStartEnabled {
+    param(
+        [string]$ExpectedCommand
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ExpectedCommand)) {
+        $ExpectedCommand = Get-AutoStartCommand
+    }
+
     try {
         $value = (Get-ItemProperty -Path $script:AutoStartRegPath -Name $script:AutoStartValueName -ErrorAction Stop).$($script:AutoStartValueName)
-        $regEnabled = -not [string]::IsNullOrWhiteSpace([string]$value)
+        return (Normalize-LauncherText ([string]$value)) -eq (Normalize-LauncherText $ExpectedCommand)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-AnyAutoStartArtifactPresent {
+    $hasRunValue = $false
+    try {
+        $value = (Get-ItemProperty -Path $script:AutoStartRegPath -Name $script:AutoStartValueName -ErrorAction Stop).$($script:AutoStartValueName)
+        $hasRunValue = -not [string]::IsNullOrWhiteSpace([string]$value)
     }
     catch {
     }
 
-    return $regEnabled -or (Test-StartupShortcutEnabled)
+    return $hasRunValue -or (Test-Path -LiteralPath (Get-StartupShortcutPath))
+}
+
+function Test-AutoStartEnabled {
+    param(
+        [switch]$EnsureLauncher
+    )
+
+    $launcherSpec = Get-PreferredLauncherSpec -EnsureAvailable:$EnsureLauncher
+    $command = Get-AutoStartCommand -EnsureLauncher:$EnsureLauncher
+    return (Test-RunAutoStartEnabled -ExpectedCommand $command) -and (Test-StartupShortcutEnabled -LauncherSpec $launcherSpec)
 }
 
 function Set-AutoStartEnabled {
@@ -1880,8 +2053,10 @@ function Set-AutoStartEnabled {
     )
 
     if ($Enabled) {
-        New-ItemProperty -Path $script:AutoStartRegPath -Name $script:AutoStartValueName -Value (Get-AutoStartCommand) -PropertyType String -Force | Out-Null
-        Set-StartupShortcutEnabled -Enabled $true
+        $launcherSpec = Get-PreferredLauncherSpec -EnsureAvailable
+        $command = Get-AutoStartCommand
+        New-ItemProperty -Path $script:AutoStartRegPath -Name $script:AutoStartValueName -Value $command -PropertyType String -Force | Out-Null
+        Set-StartupShortcutEnabled -Enabled $true -LauncherSpec $launcherSpec
         return
     }
 
@@ -1895,7 +2070,13 @@ function Sync-AutoStartWithSettings {
     )
 
     $desiredEnabled = Get-DesiredAutoStartEnabled -Settings $Settings
-    $currentEnabled = Test-AutoStartEnabled
+    $currentEnabled = $false
+    if ($desiredEnabled) {
+        $currentEnabled = Test-AutoStartEnabled -EnsureLauncher
+    }
+    else {
+        $currentEnabled = Test-AnyAutoStartArtifactPresent
+    }
     if ($desiredEnabled -eq $currentEnabled) {
         return
     }
@@ -2809,7 +2990,7 @@ function Get-WeeklyReviewSummary {
     }
 
     $topDistractingApps = @(Get-TopProcessesForRange -UsageData $UsageData -Days $Days -Top 15 | Where-Object {
-        (Get-CategoryParentKey -Category ([string]$_.category)) -in @("socials", "browser_fun")
+        (Get-CategoryParentKey -Category (Get-ActivityField -Activity $_ -Name "category")) -in @("socials", "browser_fun")
     } | Select-Object -First 10)
 
     $biggestSlip = @($slippedDays | Sort-Object -Property score -Descending | Select-Object -First 1)
@@ -3356,9 +3537,9 @@ function Get-AnalyticsSummary {
     }
 
     $topApps = @(Get-TopProcessesForRange -UsageData $UsageData -Days $Days -Top 15)
-    $topDistractingApp = @($topApps | Where-Object { $_.category -in @("browser_fun", "socials") } | Select-Object -First 1)
+    $topDistractingApp = @($topApps | Where-Object { (Get-ActivityField -Activity $_ -Name "category") -in @("browser_fun", "socials") } | Select-Object -First 1)
     if ($topDistractingApp.Count -eq 0) {
-        $topDistractingApp = @($topApps | Where-Object { $_.category -ne "study" } | Select-Object -First 1)
+        $topDistractingApp = @($topApps | Where-Object { (Get-ActivityField -Activity $_ -Name "category") -ne "study" } | Select-Object -First 1)
     }
 
     $averageSeconds = 0.0
@@ -3418,7 +3599,7 @@ function Get-AnalyticsExportRows {
             Scope = "$Days-day"
             Date = ""
             Process = [string]$app.process
-            Category = [string]$app.category
+            Category = Get-ActivityField -Activity $app -Name "category"
             Seconds = [math]::Round([double]$app.seconds)
             Hours = [math]::Round(([double]$app.seconds / 3600.0), 2)
             SharePercent = $sharePercent
@@ -4936,7 +5117,7 @@ function Update-AppUsageList {
                 $share = "{0:N1}%" -f (($app.seconds / $total) * 100)
             }
             $item = New-Object System.Windows.Forms.ListViewItem([string]$app.process)
-            [void]$item.SubItems.Add((Get-CategoryLabel $app.category))
+            [void]$item.SubItems.Add((Get-CategoryLabel (Get-ActivityField -Activity $app -Name "category")))
             [void]$item.SubItems.Add((Format-Duration $app.seconds))
             [void]$item.SubItems.Add($share)
             [void]$AppList.Items.Add($item)
@@ -4960,8 +5141,8 @@ function Update-ExactCategoryList {
     Invoke-ListViewBatchUpdate -ListView $CategoryList -Action {
         $CategoryList.Items.Clear()
         foreach ($entry in @($Items)) {
-            $item = New-Object System.Windows.Forms.ListViewItem((Get-CategoryLabel $entry.category))
-            [void]$item.SubItems.Add((Get-CategoryLabel $entry.parent))
+            $item = New-Object System.Windows.Forms.ListViewItem((Get-CategoryLabel (Get-ActivityField -Activity $entry -Name "category")))
+            [void]$item.SubItems.Add((Get-CategoryLabel (Get-ActivityField -Activity $entry -Name "parent")))
             [void]$item.SubItems.Add((Format-Duration $entry.seconds))
             [void]$CategoryList.Items.Add($item)
         }
@@ -5000,12 +5181,17 @@ function Update-AutoStartUi {
 
     $enabled = Test-AutoStartEnabled
     $desired = Get-DesiredAutoStartEnabled -Settings $State.Settings
+    $launcherSpec = Get-PreferredLauncherSpec
+    $launcherText = "VBS"
+    if ([string]$launcherSpec.Kind -eq "exe") {
+        $launcherText = "EXE"
+    }
     if ($desired -and $enabled) {
-        $State.Controls.AutoStartLabel.Text = "Autostart: enabled"
+        $State.Controls.AutoStartLabel.Text = "Autostart: enabled ($launcherText)"
         $State.Controls.AutoStartLabel.ForeColor = [System.Drawing.Color]::DarkGreen
     }
     elseif ($desired) {
-        $State.Controls.AutoStartLabel.Text = "Autostart: repair pending"
+        $State.Controls.AutoStartLabel.Text = "Autostart: repair pending ($launcherText)"
         $State.Controls.AutoStartLabel.ForeColor = [System.Drawing.Color]::DarkOrange
     }
     else {
@@ -5071,7 +5257,7 @@ function Update-InsightsUi {
         $list.Items.Clear()
         foreach ($app in $insights.weeklyApps) {
             $item = New-Object System.Windows.Forms.ListViewItem([string]$app.process)
-            [void]$item.SubItems.Add((Get-CategoryLabel $app.category))
+            [void]$item.SubItems.Add((Get-CategoryLabel (Get-ActivityField -Activity $app -Name "category")))
             [void]$item.SubItems.Add((Format-Duration $app.seconds))
             [void]$list.Items.Add($item)
         }
@@ -5111,7 +5297,7 @@ function Update-WeeklyReviewUi {
         $appsList.Items.Clear()
         foreach ($app in @($review.topDistractingApps)) {
             $item = New-Object System.Windows.Forms.ListViewItem([string]$app.process)
-            [void]$item.SubItems.Add((Get-CategoryLabel $app.category))
+            [void]$item.SubItems.Add((Get-CategoryLabel (Get-ActivityField -Activity $app -Name "category")))
             [void]$item.SubItems.Add((Format-Duration $app.seconds))
             [void]$appsList.Items.Add($item)
         }
@@ -5203,7 +5389,7 @@ function Update-AnalyticsUi {
                 $share = "{0:N1}%" -f (($app.seconds / $periodTotal) * 100)
             }
             $item = New-Object System.Windows.Forms.ListViewItem([string]$app.process)
-            [void]$item.SubItems.Add((Get-CategoryLabel $app.category))
+            [void]$item.SubItems.Add((Get-CategoryLabel (Get-ActivityField -Activity $app -Name "category")))
             [void]$item.SubItems.Add((Format-Duration $app.seconds))
             [void]$item.SubItems.Add($share)
             [void]$list.Items.Add($item)
@@ -5248,7 +5434,7 @@ function Update-SessionsUi {
             }
             $item = New-Object System.Windows.Forms.ListViewItem($endTime)
             [void]$item.SubItems.Add((Format-ShortDuration $session.seconds))
-            [void]$item.SubItems.Add((Get-CategoryLabel $session.category))
+            [void]$item.SubItems.Add((Get-CategoryLabel (Get-ActivityField -Activity $session -Name "category")))
             [void]$item.SubItems.Add([string]$session.process)
             [void]$item.SubItems.Add((Get-ActivityDisplayTitle $session))
             [void]$todayList.Items.Add($item)
@@ -5267,7 +5453,7 @@ function Update-SessionsUi {
             }
             $item = New-Object System.Windows.Forms.ListViewItem($dateText)
             [void]$item.SubItems.Add((Format-ShortDuration $session.seconds))
-            [void]$item.SubItems.Add((Get-CategoryLabel $session.category))
+            [void]$item.SubItems.Add((Get-CategoryLabel (Get-ActivityField -Activity $session -Name "category")))
             [void]$item.SubItems.Add([string]$session.process)
             [void]$item.SubItems.Add((Get-ActivityDisplayTitle $session))
             [void]$weekList.Items.Add($item)
@@ -6190,8 +6376,15 @@ function Invoke-SelfTestMode {
     )
     $normalizedPriorityRules = @(Normalize-Rules -Rules $priorityRules)
     if ((Get-CategoryForActivity -Activity @{ ProcessName = "Code"; WindowTitle = "Lesson" } -Rules $normalizedPriorityRules) -ne "study") { throw "Rule priority or exact matching failed." }
-    if (-not (Get-AutoStartCommand).Contains("-StartMinimized")) { throw "Autostart command is missing minimized mode." }
-    if (-not (Get-AutoStartCommand).ToLowerInvariant().Contains("wscript.exe")) { throw "Autostart command should use wscript.exe." }
+    $launcherReady = Ensure-ExeLauncher
+    $autoStartCommand = Get-AutoStartCommand
+    if (-not $autoStartCommand.Contains("-StartMinimized")) { throw "Autostart command is missing minimized mode." }
+    if ($launcherReady) {
+        if (-not $autoStartCommand.ToLowerInvariant().Contains("screentimetracker.exe")) { throw "Autostart command should prefer the EXE launcher." }
+    }
+    elseif (-not $autoStartCommand.ToLowerInvariant().Contains("wscript.exe")) {
+        throw "Autostart fallback should use wscript.exe."
+    }
     Remove-Item -LiteralPath $script:ReopenSignalPath -ErrorAction SilentlyContinue
     if (-not (Request-ReopenRunningInstance)) { throw "Reopen request write failed." }
     if (-not (Consume-ReopenRunningInstanceRequest)) { throw "Reopen request consume failed." }

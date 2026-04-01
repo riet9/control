@@ -13,7 +13,7 @@
 # Windows noise
 Thumbs.db
 Desktop.ini
+ScreenTimeTracker.exe
 
 # Python cache if used for helper scripts later
 __pycache__/
-

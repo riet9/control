@@ -20,6 +20,7 @@ Default limits:
 
 - Active-time tracking instead of simple PC uptime
 - Idle detection
+- Silent launcher EXE builder for cleaner startup
 - Rules by process, window title, URL, or domain
 - Custom categories mapped to built-in parent categories
 - Review screen for uncategorized activity
@@ -39,20 +40,37 @@ Default limits:
 ## Project Structure
 
 - `ScreenTimeTracker.ps1` - main application
-- `start-tracker.vbs` - silent launcher without console window
+- `launcher/ScreenTimeTrackerLauncher.cs` - source for the silent EXE launcher
+- `scripts/build-launcher.ps1` - builds `ScreenTimeTracker.exe`
+- `ScreenTimeTracker.exe` - generated silent launcher without console window
+- `start-tracker.vbs` - legacy fallback launcher
 - `start-tracker.bat` - convenience launcher
 - `settings.json` - default settings
 - `rules.json` - built-in classification rules
 - `browser-extension/` - unpacked Chromium extension for exact site tracking
 - `Image/` - application icon assets
+- `docs/screenshots/` - GitHub screenshots
 - `data/` - runtime data, logs, caches, exports, backups
 
 ## Quick Start
 
-1. Double-click `start-tracker.vbs`
-2. Open the tray icon if the window starts minimized
-3. Adjust limits in `Settings`
-4. Refine classification through `Rules`, `Categories`, `Review`, and `Health`
+From a GitHub checkout:
+
+1. Build the launcher:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-launcher.ps1
+```
+
+2. Double-click `ScreenTimeTracker.exe`
+3. Open the tray icon if the window starts minimized
+4. Adjust limits in `Settings`
+5. Refine classification through `Rules`, `Categories`, `Review`, and `Health`
+
+Fallback if you do not want to build the launcher:
+
+- Double-click `start-tracker.vbs`
+- Or run `start-tracker.bat`
 
 Manual run from terminal:
 
@@ -76,6 +94,28 @@ To classify browser activity by exact domain instead of only the tab title:
 4. Select the `browser-extension` folder
 
 The extension sends active-tab data to `127.0.0.1:38945`.
+
+## Screenshots
+
+### Dashboard
+
+![Dashboard](docs/screenshots/1.png)
+
+### Weekly Review
+
+![Week review](docs/screenshots/2.png)
+
+### Health and Suggestions
+
+![Health](docs/screenshots/3.png)
+
+### Analytics
+
+![Analytics](docs/screenshots/4.png)
+
+### Quick Glance
+
+![Quick glance](docs/screenshots/5.png)
 
 ## Main Screens
 
@@ -138,6 +178,7 @@ The app already includes:
 
 - This repository is intended for Windows users
 - No external package installation is required
+- `ScreenTimeTracker.exe` is generated locally and is not committed
 - Runtime data is generated automatically on first run
 - License: MIT
 
